@@ -432,6 +432,22 @@
 
     <script>
         let currentData = null; // Armazena os dados atuais da tela para exportação
+        
+        // --- 🔒 AUTENTICAÇÃO ---
+        let apiToken = localStorage.getItem('sankhya_api_token');
+        if (!apiToken) {
+            trancarEAutenticar();
+        }
+
+        function trancarEAutenticar() {
+            apiToken = prompt("🔒 ACESSO RESTRITO\n\nPor favor, digite o Token de Segurança (API_TOKEN) para liberar o Studio:");
+            if (apiToken) {
+                localStorage.setItem('sankhya_api_token', apiToken);
+            } else {
+                alert("O acesso ficará bloqueado sem a senha.");
+            }
+        }
+        // ------------------------
 
         // Atalho F5 para executar
         document.addEventListener('keydown', function(e) {
@@ -458,14 +474,28 @@
             document.getElementById('btnExcel').disabled = true;
 
             try {
+                if (!apiToken) {
+                    trancarEAutenticar();
+                    if (!apiToken) throw new Error("Ação cancelada: Token não informado.");
+                }
+
                 const response = await fetch('/sql', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'x-api-key': apiToken
+                    },
                     body: JSON.stringify({ query: sql })
                 });
 
                 const data = await response.json();
 
+                if (response.status === 401) {
+                    localStorage.removeItem('sankhya_api_token');
+                    apiToken = null;
+                    throw new Error("🔒 Acesso Negado: A senha fornecida está incorreta!");
+                }
+                
                 if (!response.ok) {
                     throw new Error(data.erro || 'Erro desconhecido HTTP ' + response.status);
                 }

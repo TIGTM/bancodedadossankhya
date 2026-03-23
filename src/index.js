@@ -10,8 +10,27 @@ app.use(cors());
 app.use(express.json()); // Suporte para envio de JSON no POST
 app.use(express.text()); // Suporte para envio de texto puro no POST
 
-// 📍 Rota para servir a Interface Gráfica (HTML, CSS, JS)
+// 📍 Rota para servir a Interface Gráfica (HTML, CSS, JS) - aberta p/ carregar o frontend visual (apenas HTML, dados e queries bloqueados no gateway abaixo)
 app.use(express.static('public'));
+
+// 🔒 MIDDLEWARE DE SEGURANÇA (BLINDAGEM DA API)
+app.use((req, res, next) => {
+  const tokenConfigurado = process.env.API_TOKEN;
+  
+  if (!tokenConfigurado) {
+     console.error('[Segurança] ALERTA: Variável API_TOKEN não foi encontrada no .env do servidor!');
+     return res.status(500).json({ erro: 'Servidor trancado por falta de configuração. Variável API_TOKEN exigida no arquivo .env.' });
+  }
+
+  // Verifica se o Token foi enviado no Cabeçalho (x-api-key) ou diretamente na URL (?token=...)
+  const tokenInformado = req.headers['x-api-key'] || req.query.token;
+
+  if (tokenInformado !== tokenConfigurado) {
+     return res.status(401).json({ erro: '🔒 Acesso Negado: Token de Segurança Inválido ou Ausente.' });
+  }
+
+  next(); // Passou na segurança? Pode consultar os endpoints /sql abaixo!
+});
 
 /**
  * 📍 Rota GET /sql
