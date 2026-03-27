@@ -40,7 +40,7 @@ const STATUS_ERRO = new Set(['1','3','4','5']);
 // CAMADA 1 — GATEWAY
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function chamarUrl(url, serviceName, outputType, requestBody) {
+async function chamarUrl(url, serviceName, outputType, requestBody, signal) {
   const modulo = url.includes('mgecom') ? 'mgecom' : 'mge';
   const token  = await obterToken();
   let resposta;
@@ -48,8 +48,10 @@ async function chamarUrl(url, serviceName, outputType, requestBody) {
     resposta = await axios.post(url, { serviceName, requestBody }, {
       params:  { serviceName, outputType },
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      signal: signal,
     });
   } catch (err) {
+    if (axios.isCancel(err)) throw err;
     const detalhe = err.response?.data?.statusMessage || err.message;
     throw new Error(`[${modulo}] HTTP Error: ${detalhe}`);
   }
@@ -68,7 +70,7 @@ async function chamarUrl(url, serviceName, outputType, requestBody) {
   return dados;
 }
 
-async function chamarGateway(serviceName, outputType = 'json', requestBody = {}, entidade = '') {
+async function chamarGateway(serviceName, outputType = 'json', requestBody = {}, entidade = '', signal = null) {
   const urls = ENTIDADES_MGECOM.has(entidade)
     ? [URL_GATEWAY_MGECOM, URL_GATEWAY_MGEFIN, URL_GATEWAY]  // notas fiscais: tenta todos os módulos
     : [URL_GATEWAY];                                          // demais: só mge-dwf
@@ -76,8 +78,9 @@ async function chamarGateway(serviceName, outputType = 'json', requestBody = {},
   let ultimoErro;
   for (const url of urls) {
     try {
-      return await chamarUrl(url, serviceName, outputType, requestBody);
+      return await chamarUrl(url, serviceName, outputType, requestBody, signal);
     } catch (err) {
+      if (axios.isCancel(err)) throw err;
       console.log(`[gateway] falhou (${url.includes('mgecom') ? 'mgecom' : 'mge'}) para "${entidade}": ${err.message}`);
       ultimoErro = err;
     }
@@ -267,7 +270,7 @@ export async function execute(serviceName, outputType = 'json', requestBody = {}
  * @param {string} sql - SQL Oracle (ex: "SELECT NUNOTA, DTNEG FROM TGFCAB WHERE ROWNUM <= 10")
  * @returns {Promise<{colunas: string[], registros: object[]}>}
  */
-export async function executarSQL(sql) {
+export async function executarSQL(sql, signal) {
   // DbExplorerSP.executeQuery retorna status "1" mas com dados válidos em responseBody.
   // Por isso NÃO usa chamarUrl (que lança erro em status != '0') — faz o HTTP call direto.
   const token = await obterToken();
@@ -280,9 +283,11 @@ export async function executarSQL(sql) {
       {
         params:  { serviceName: 'DbExplorerSP.executeQuery', outputType: 'json' },
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        signal: signal
       }
     );
   } catch (err) {
+    if (axios.isCancel(err)) throw err;
     const detalhe = err.response?.data?.statusMessage || err.message;
     throw new Error(`[sql] HTTP error: ${detalhe}`);
   }

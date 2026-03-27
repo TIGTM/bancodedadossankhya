@@ -37,6 +37,9 @@ app.use((req, res, next) => {
  * Exemplo de uso: http://localhost:3000/sql?query=SELECT TOP 10 NUNOTA, VLRNOTA FROM TGFCAB
  */
 app.get('/sql', async (req, res) => {
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
+
   try {
     const query = req.query.query || req.query.q;
     
@@ -45,11 +48,14 @@ app.get('/sql', async (req, res) => {
     }
     
     console.log(`[BancoSankhya] GET SQL Recebido: ${query}`);
-    const resultado = await executarSQL(query);
+    const resultado = await executarSQL(query, controller.signal);
     
-    // Retornamos direto 'registros', para que o Power BI já enxergue como uma lista plana e converta em Tabela logo de cara
     res.json(resultado.registros);
   } catch (erro) {
+    if (controller.signal.aborted) {
+      console.log('[BancoSankhya] GET SQL Cancelado pelo usuário.');
+      return;
+    }
     console.error(`[BancoSankhya] Erro ao executar GET SQL:`, erro.message);
     res.status(500).json({ erro: erro.message });
   }
@@ -60,10 +66,12 @@ app.get('/sql', async (req, res) => {
  * Exemplo de uso em PowerBI via conector Web usando JSON ou texto puro na request.
  */
 app.post('/sql', async (req, res) => {
+  const controller = new AbortController();
+  req.on('close', () => controller.abort());
+
   try {
     let query = req.body;
     
-    // Se o cliente (Power BI) mandou via JSON {"query": "SELECT..."}
     if (typeof query === 'object') {
       query = query.query || query.sql || query.q;
     }
@@ -73,11 +81,14 @@ app.post('/sql', async (req, res) => {
     }
 
     console.log(`[BancoSankhya] POST SQL Recebido: ${query}`);
-    const resultado = await executarSQL(query);
+    const resultado = await executarSQL(query, controller.signal);
     
-    // Mesma lógica, retornando os registros planos como array para fácil ingestão do Power BI
     res.json(resultado.registros);
   } catch (erro) {
+    if (controller.signal.aborted) {
+      console.log('[BancoSankhya] POST SQL Cancelado pelo usuário.');
+      return;
+    }
     console.error(`[BancoSankhya] Erro ao executar POST SQL:`, erro.message);
     res.status(500).json({ erro: erro.message });
   }

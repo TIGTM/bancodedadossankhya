@@ -364,6 +364,36 @@
         ::-webkit-scrollbar-thumb:hover {
             background: rgba(255, 255, 255, 0.2);
         }
+
+        /* Botão Cancelar Consulta */
+        .cancel-btn {
+            background: rgba(239, 68, 68, 0.15);
+            color: #ff8080;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 0.6rem 1.2rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 1.5rem;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            backdrop-filter: blur(4px);
+        }
+
+        .cancel-btn:hover {
+            background: rgba(239, 68, 68, 0.3);
+            border-color: #ef4444;
+            color: white;
+            transform: translateY(-2px);
+        }
+
+        .cancel-btn svg {
+            width: 14px;
+            height: 14px;
+        }
     </style>
 </head>
 <body>
@@ -425,18 +455,31 @@
             <!-- Loader Overlay -->
             <div class="loader-container" id="loader">
                 <div class="spinner"></div>
-                <p>Consultando banco Sankhya...</p>
+                <p id="loaderText">Consultando banco Sankhya...</p>
+                <button class="cancel-btn" id="cancelBtn" onclick="cancelSQL()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    Interromper Consulta
+                </button>
             </div>
         </div>
     </main>
 
     <script>
-        let currentData = null; // Armazena os dados atuais da tela para exportação
-        
-        // --- 🔒 AUTENTICAÇÃO ---
+        // --- 🔒 AUTENTICAÇÃO E CONTROLE ---
         let apiToken = localStorage.getItem('sankhya_api_token');
+        let currentAbortController = null;
+        let currentData = null; // Armazena os dados atuais da tela para exportação
+
         if (!apiToken) {
             trancarEAutenticar();
+        }
+
+        function cancelSQL() {
+            if (currentAbortController) {
+                console.warn("🛑 Usuário solicitou interrupção da consulta.");
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
         }
 
         function trancarEAutenticar() {
@@ -473,6 +516,9 @@
             document.getElementById('btnCsv').disabled = true;
             document.getElementById('btnExcel').disabled = true;
 
+            // Prepara cancelamento
+            currentAbortController = new AbortController();
+
             try {
                 if (!apiToken) {
                     trancarEAutenticar();
@@ -485,7 +531,8 @@
                         'Content-Type': 'application/json',
                         'x-api-key': apiToken
                     },
-                    body: JSON.stringify({ query: sql })
+                    body: JSON.stringify({ query: sql }),
+                    signal: currentAbortController.signal
                 });
 
                 const data = await response.json();
@@ -511,6 +558,18 @@
                 }
 
             } catch (err) {
+                if (err.name === 'AbortError') {
+                    container.innerHTML = `
+                        <div class="message-state">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>
+                            <p style="font-weight: 600">Consulta interrompida</p>
+                            <p style="font-size: 0.875rem; opacity: 0.8">Você cancelou a execução do comando SQL.</p>
+                        </div>
+                    `;
+                    stats.innerText = `Cancelado`;
+                    return;
+                }
+
                 console.error(err);
                 container.innerHTML = `
                     <div class="message-state error">
@@ -524,6 +583,7 @@
                 loader.classList.remove('active');
                 btn.disabled = false;
                 btn.style.opacity = '1';
+                currentAbortController = null;
             }
         }
 
