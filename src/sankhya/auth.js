@@ -71,3 +71,8 @@ export async function obterToken() {
   }
   return tokenOAuth;
 }
+
+export function invalidarToken() {
+  tokenOAuth    = null;
+  tokenOAuthExp = null;
+}

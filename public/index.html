@@ -525,6 +525,7 @@
                     if (!apiToken) throw new Error("Ação cancelada: Token não informado.");
                 }
 
+                console.log("🚀 Enviando requisição para o servidor...");
                 const response = await fetch('/sql', {
                     method: 'POST',
                     headers: { 
@@ -535,7 +536,9 @@
                     signal: currentAbortController.signal
                 });
 
+                console.log("⏱️ Resposta recebida do servidor. Extraindo JSON...");
                 const data = await response.json();
+                console.log("✅ JSON extraído com sucesso. Iniciando renderização...");
 
                 if (response.status === 401) {
                     localStorage.removeItem('sankhya_api_token');

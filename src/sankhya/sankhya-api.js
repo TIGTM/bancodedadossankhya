@@ -17,7 +17,7 @@
  */
 
 import axios from 'axios';
-import { obterToken } from './auth.js';
+import { obterToken, invalidarToken } from './auth.js';
 
 // ─── URLs Base ────────────────────────────────────────────────────────────────
 const URL_GATEWAY        = 'https://api.sankhya.com.br/gateway/v1/mge/service.sbr';
@@ -40,7 +40,7 @@ const STATUS_ERRO = new Set(['1','3','4','5']);
 // CAMADA 1 — GATEWAY
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function chamarUrl(url, serviceName, outputType, requestBody, signal) {
+async function chamarUrl(url, serviceName, outputType, requestBody) {
   const modulo = url.includes('mgecom') ? 'mgecom' : 'mge';
   const token  = await obterToken();
   let resposta;
@@ -48,10 +48,8 @@ async function chamarUrl(url, serviceName, outputType, requestBody, signal) {
     resposta = await axios.post(url, { serviceName, requestBody }, {
       params:  { serviceName, outputType },
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      signal: signal,
     });
   } catch (err) {
-    if (axios.isCancel(err)) throw err;
     const detalhe = err.response?.data?.statusMessage || err.message;
     throw new Error(`[${modulo}] HTTP Error: ${detalhe}`);
   }
@@ -70,7 +68,7 @@ async function chamarUrl(url, serviceName, outputType, requestBody, signal) {
   return dados;
 }
 
-async function chamarGateway(serviceName, outputType = 'json', requestBody = {}, entidade = '', signal = null) {
+async function chamarGateway(serviceName, outputType = 'json', requestBody = {}, entidade = '') {
   const urls = ENTIDADES_MGECOM.has(entidade)
     ? [URL_GATEWAY_MGECOM, URL_GATEWAY_MGEFIN, URL_GATEWAY]  // notas fiscais: tenta todos os módulos
     : [URL_GATEWAY];                                          // demais: só mge-dwf
@@ -78,9 +76,8 @@ async function chamarGateway(serviceName, outputType = 'json', requestBody = {},
   let ultimoErro;
   for (const url of urls) {
     try {
-      return await chamarUrl(url, serviceName, outputType, requestBody, signal);
+      return await chamarUrl(url, serviceName, outputType, requestBody);
     } catch (err) {
-      if (axios.isCancel(err)) throw err;
       console.log(`[gateway] falhou (${url.includes('mgecom') ? 'mgecom' : 'mge'}) para "${entidade}": ${err.message}`);
       ultimoErro = err;
     }
@@ -270,9 +267,10 @@ export async function execute(serviceName, outputType = 'json', requestBody = {}
  * @param {string} sql - SQL Oracle (ex: "SELECT NUNOTA, DTNEG FROM TGFCAB WHERE ROWNUM <= 10")
  * @returns {Promise<{colunas: string[], registros: object[]}>}
  */
-export async function executarSQL(sql, signal) {
-  // DbExplorerSP.executeQuery retorna status "1" mas com dados válidos em responseBody.
-  // Por isso NÃO usa chamarUrl (que lança erro em status != '0') — faz o HTTP call direto.
+export async function executarSQL(sql, _retry = false) {
+  console.log(`[sql] Iniciando execução via DbExplorerSP...${_retry ? ' (retry)' : ''}`);
+  const tempoInicio = Date.now();
+  
   const token = await obterToken();
   const url   = URL_GATEWAY;
 
@@ -283,11 +281,9 @@ export async function executarSQL(sql, signal) {
       {
         params:  { serviceName: 'DbExplorerSP.executeQuery', outputType: 'json' },
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        signal: signal
       }
     );
   } catch (err) {
-    if (axios.isCancel(err)) throw err;
     const detalhe = err.response?.data?.statusMessage || err.message;
     throw new Error(`[sql] HTTP error: ${detalhe}`);
   }
@@ -295,13 +291,17 @@ export async function executarSQL(sql, signal) {
   const dados = resposta.data;
   const body  = dados?.responseBody;
 
-  // Verifica se há mensagem de erro real (sem dados)
   if (!body || (!body.rows && !body.fieldsMetadata)) {
     const msg = dados?.statusMessage || dados?.responseBody?.tsException?.message || 'Sem dados';
+    // Token expirado/invalidado pelo Sankhya — renova e tenta 1x
+    if (!_retry && /n[aã]o autorizado|unauthorized|token/i.test(msg)) {
+      console.log(`[sql] Token rejeitado pelo Sankhya, renovando...`);
+      invalidarToken();
+      return executarSQL(sql, true);
+    }
     throw new Error(`[sql] ${msg}`);
   }
 
-  // Formato DbExplorerSP: fieldsMetadata + rows
   const colunas = (body.fieldsMetadata ?? []).map(f => f.name);
   const rows    = Array.isArray(body.rows) ? body.rows : [];
 
@@ -311,7 +311,8 @@ export async function executarSQL(sql, signal) {
       : row
   );
 
-  console.log(`[sql] DbExplorerSP OK — ${rows.length} linhas, colunas: [${colunas}]`);
+  const tempoTotal = Date.now() - tempoInicio;
+  console.log(`[sql] DbExplorerSP OK (${tempoTotal}ms) — ${rows.length} linhas, colunas: [${colunas}]`);
   return { colunas, registros, total: rows.length };
 }
 
