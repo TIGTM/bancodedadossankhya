@@ -276,6 +276,57 @@ export async function execute(serviceName, outputType = 'json', requestBody = {}
 // Cache do tipo de banco detectado no primeiro uso ('oracle' | 'sqlserver' | null)
 let _tipoBanco = null;
 
+/**
+ * Separa a parte WITH (CTEs) do SELECT final de um SQL.
+ * Necessário para SQL Server, que não aceita WITH dentro de subquery.
+ */
+function _extrairCTEs(sql) {
+  const s = sql.trim();
+  if (!/^WITH\s/i.test(s)) return { ctes: '', finalSelect: s };
+
+  let depth = 0, i = 0, dentroStr = false, charStr = '';
+  while (i < s.length) {
+    const ch = s[i];
+    if (dentroStr) { if (ch === charStr) dentroStr = false; i++; continue; }
+    if (ch === "'" || ch === '"') { dentroStr = true; charStr = ch; i++; continue; }
+    if (ch === '(') { depth++; }
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) {
+        let j = i + 1;
+        while (j < s.length && /\s/.test(s[j])) j++;
+        if (s[j] !== ',') {
+          // fim das CTEs — o que segue é o SELECT final
+          return { ctes: s.substring(0, i + 1), finalSelect: s.substring(j).trim() };
+        }
+        i = j + 1; continue;
+      }
+    }
+    i++;
+  }
+  return { ctes: '', finalSelect: s };
+}
+
+/**
+ * Remove o ORDER BY de nível 0 (fora de parênteses) do final do SQL.
+ * Necessário para poder envolver o SQL em uma subquery.
+ */
+function _removerOrderBy(sql) {
+  let depth = 0, ultimoOrderBy = -1, i = 0, dentroStr = false, charStr = '';
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (dentroStr) { if (ch === charStr) dentroStr = false; i++; continue; }
+    if (ch === "'" || ch === '"') { dentroStr = true; charStr = ch; i++; continue; }
+    if (ch === '(') { depth++; i++; continue; }
+    if (ch === ')') { depth--; i++; continue; }
+    if (depth === 0 && /^ORDER\s+BY\b/i.test(sql.substring(i))) {
+      ultimoOrderBy = i;
+    }
+    i++;
+  }
+  return ultimoOrderBy >= 0 ? sql.substring(0, ultimoOrderBy).trimEnd() : sql;
+}
+
 function _sqlPaginado(sql, pagina, bloco, tipo) {
   const offset = pagina * bloco;
   if (tipo === 'oracle') {
@@ -283,15 +334,44 @@ function _sqlPaginado(sql, pagina, bloco, tipo) {
       ? `SELECT * FROM (${sql}) q__ WHERE ROWNUM <= ${bloco}`
       : `SELECT * FROM (SELECT q__.*, ROWNUM AS rn__ FROM (${sql}) q__ WHERE ROWNUM <= ${offset + bloco}) WHERE rn__ > ${offset}`;
   }
-  // SQL Server
-  return offset === 0
-    ? `SELECT TOP ${bloco} * FROM (${sql}) AS q__`
-    : `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn__ FROM (${sql}) AS q__) AS paged__ WHERE rn__ > ${offset} AND rn__ <= ${offset + bloco}`;
+
+  // SQL Server — extrai CTEs para não violarem a restrição de WITH em subquery
+  const { ctes, finalSelect } = _extrairCTEs(sql);
+  const semOrderBy = _removerOrderBy(finalSelect);
+
+  if (offset === 0) {
+    // Página 1: SELECT TOP N
+    return ctes
+      ? `${ctes}\nSELECT TOP ${bloco} * FROM (\n${semOrderBy}\n) AS q__`
+      : `SELECT TOP ${bloco} * FROM (\n${semOrderBy}\n) AS q__`;
+  }
+
+  // Página 2+: adiciona CTE de paginação com ROW_NUMBER para evitar aninhamento inválido
+  return ctes
+    ? `${ctes},\nrn_cte__ AS (\n  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn__\n  FROM (\n${semOrderBy}\n  ) AS q__\n)\nSELECT * FROM rn_cte__ WHERE rn__ > ${offset} AND rn__ <= ${offset + bloco}`
+    : `SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn__\n  FROM (\n${semOrderBy}\n  ) AS q__\n) AS paged__ WHERE rn__ > ${offset} AND rn__ <= ${offset + bloco}`;
+}
+
+/**
+ * Verifica se o SQL já possui um limite explícito aplicado ao resultado final
+ * (não conta TOP/ROWNUM dentro de subconsultas).
+ */
+function _temLimiteExplicito(sql) {
+  const { finalSelect } = _extrairCTEs(sql.trim());
+  // ROWNUM em Oracle
+  if (/\bROWNUM\b/i.test(finalSelect)) return true;
+  // FETCH NEXT ... ROWS (SQL Server / Oracle 12c)
+  if (/\bFETCH\s+NEXT\b/i.test(finalSelect)) return true;
+  // SELECT TOP N no início do SELECT final (não em subconsultas)
+  if (/^SELECT\s+TOP\s+\d+/i.test(finalSelect.trim())) return true;
+  // UNION onde o primeiro membro começa com SELECT TOP N
+  if (/^SELECT\s+TOP\s+\d+/i.test(finalSelect.trim().replace(/^\(+/, ''))) return true;
+  return false;
 }
 
 export async function executarSQL(sql, _retry = false) {
-  // Se o SQL já contém limite explícito — não paginar
-  const temLimiteExplicito = /\bROWNUM\b|\bTOP\b|\bFETCH\b/i.test(sql);
+  // Se o SQL já contém limite explícito no SELECT principal — não paginar
+  const temLimiteExplicito = _temLimiteExplicito(sql);
   if (temLimiteExplicito) {
     return _executarSQLBruto(sql, _retry);
   }
