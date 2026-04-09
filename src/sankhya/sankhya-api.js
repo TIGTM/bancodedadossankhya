@@ -262,56 +262,92 @@ export async function execute(serviceName, outputType = 'json', requestBody = {}
 /**
  * Executa SQL direto via DbExplorerSP.executeQuery.
  * Permite consultar QUALQUER tabela do Sankhya (ex: TGFCAB, TGFITE, TGFPAR)
- * sem depender da camada de entidades. Tenta mge-dwf, mgecom e mgefin.
+ * sem depender da camada de entidades.
  *
  * Paginação automática: a API Sankhya limita 5.000 linhas por chamada. Se o
- * SQL não contiver ROWNUM explícito, a função busca em blocos de 5.000 e
- * combina os resultados de forma transparente.
+ * SQL não contiver limite explícito (ROWNUM / TOP / FETCH), a função busca em
+ * blocos de 5.000 e combina os resultados de forma transparente.
+ * Detecta automaticamente se o banco é Oracle ou SQL Server.
  *
- * @param {string} sql - SQL Oracle (ex: "SELECT NUNOTA, DTNEG FROM TGFCAB WHERE CODEMP = 2")
+ * @param {string} sql - SQL (ex: "SELECT NUNOTA, DTNEG FROM TGFCAB WHERE CODEMP = 2")
  * @returns {Promise<{colunas: string[], registros: object[], total: number}>}
  */
+
+// Cache do tipo de banco detectado no primeiro uso ('oracle' | 'sqlserver' | null)
+let _tipoBanco = null;
+
+function _sqlPaginado(sql, pagina, bloco, tipo) {
+  const offset = pagina * bloco;
+  if (tipo === 'oracle') {
+    return offset === 0
+      ? `SELECT * FROM (${sql}) q__ WHERE ROWNUM <= ${bloco}`
+      : `SELECT * FROM (SELECT q__.*, ROWNUM AS rn__ FROM (${sql}) q__ WHERE ROWNUM <= ${offset + bloco}) WHERE rn__ > ${offset}`;
+  }
+  // SQL Server
+  return offset === 0
+    ? `SELECT TOP ${bloco} * FROM (${sql}) AS q__`
+    : `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn__ FROM (${sql}) AS q__) AS paged__ WHERE rn__ > ${offset} AND rn__ <= ${offset + bloco}`;
+}
+
 export async function executarSQL(sql, _retry = false) {
-  // Se o SQL já contém ROWNUM o usuário definiu o limite — não paginar
-  const temLimiteExplicito = /\bROWNUM\b/i.test(sql);
+  // Se o SQL já contém limite explícito — não paginar
+  const temLimiteExplicito = /\bROWNUM\b|\bTOP\b|\bFETCH\b/i.test(sql);
   if (temLimiteExplicito) {
     return _executarSQLBruto(sql, _retry);
   }
 
-  // Paginação automática em blocos de 5.000
-  const BLOCO   = 5000;
+  const BLOCO     = 5000;
   const tempoInicio = Date.now();
-  let todos      = [];
-  let colunas    = [];
-  let pagina     = 0;
+  let todos       = [];
+  let colunas     = [];
+  let pagina      = 0;
 
-  console.log(`[sql] Iniciando execução com paginação automática...`);
+  // Se ainda não sabemos o tipo de banco, detectar na primeira página
+  if (!_tipoBanco) {
+    // Tenta Oracle primeiro
+    try {
+      const sqlOracle = _sqlPaginado(sql, 0, BLOCO, 'oracle');
+      const resultado = await _executarSQLBruto(sqlOracle, _retry);
+      _tipoBanco = 'oracle';
+      console.log(`[sql] Banco detectado: Oracle. Iniciando paginação automática...`);
+      colunas = resultado.colunas.filter(c => c !== 'RN__');
+      const linhas = resultado.registros.map(({ RN__: _rn, ...resto }) => resto);
+      todos = linhas;
+      console.log(`[sql] Página 1: ${linhas.length} linhas (total acumulado: ${todos.length})`);
+      if (linhas.length < BLOCO) {
+        const tempoTotal = Date.now() - tempoInicio;
+        console.log(`[sql] Concluído (${tempoTotal}ms) — ${todos.length} linhas totais`);
+        return { colunas, registros: todos, total: todos.length };
+      }
+      pagina = 1;
+    } catch (errOracle) {
+      // Se errou por sintaxe, assume SQL Server
+      if (/sintaxe|syntax|rownum/i.test(errOracle.message)) {
+        _tipoBanco = 'sqlserver';
+        console.log(`[sql] Banco detectado: SQL Server. Iniciando paginação automática...`);
+      } else {
+        throw errOracle;
+      }
+    }
+  } else {
+    console.log(`[sql] Iniciando execução com paginação automática (${_tipoBanco})...`);
+  }
 
+  // Busca restante das páginas (ou todas as páginas se SQL Server)
   while (true) {
-    const offset = pagina * BLOCO;
-    const sqlPaginado = offset === 0
-      ? `SELECT * FROM (${sql}) WHERE ROWNUM <= ${BLOCO}`
-      : `SELECT * FROM (SELECT q.*, ROWNUM AS rn__ FROM (${sql}) q WHERE ROWNUM <= ${offset + BLOCO}) WHERE rn__ > ${offset}`;
-
-    const resultado = await _executarSQLBruto(sqlPaginado, _retry);
+    const sqlPag = _sqlPaginado(sql, pagina, BLOCO, _tipoBanco);
+    const resultado = await _executarSQLBruto(sqlPag, _retry);
 
     if (pagina === 0) {
       colunas = resultado.colunas.filter(c => c !== 'RN__');
     }
 
-    // Remove a coluna auxiliar de paginação (rn__) se presente
-    const linhas = resultado.registros.map(row => {
-      const { RN__: _rn, ...resto } = row;
-      return resto;
-    });
-
+    const linhas = resultado.registros.map(({ RN__: _rn, ...resto }) => resto);
     todos = todos.concat(linhas);
 
     console.log(`[sql] Página ${pagina + 1}: ${linhas.length} linhas (total acumulado: ${todos.length})`);
 
-    // Menos que o bloco completo = última página
     if (linhas.length < BLOCO) break;
-
     pagina++;
   }
 
