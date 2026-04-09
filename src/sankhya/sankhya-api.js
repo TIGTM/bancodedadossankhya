@@ -264,13 +264,69 @@ export async function execute(serviceName, outputType = 'json', requestBody = {}
  * Permite consultar QUALQUER tabela do Sankhya (ex: TGFCAB, TGFITE, TGFPAR)
  * sem depender da camada de entidades. Tenta mge-dwf, mgecom e mgefin.
  *
- * @param {string} sql - SQL Oracle (ex: "SELECT NUNOTA, DTNEG FROM TGFCAB WHERE ROWNUM <= 10")
- * @returns {Promise<{colunas: string[], registros: object[]}>}
+ * Paginação automática: a API Sankhya limita 5.000 linhas por chamada. Se o
+ * SQL não contiver ROWNUM explícito, a função busca em blocos de 5.000 e
+ * combina os resultados de forma transparente.
+ *
+ * @param {string} sql - SQL Oracle (ex: "SELECT NUNOTA, DTNEG FROM TGFCAB WHERE CODEMP = 2")
+ * @returns {Promise<{colunas: string[], registros: object[], total: number}>}
  */
 export async function executarSQL(sql, _retry = false) {
-  console.log(`[sql] Iniciando execução via DbExplorerSP...${_retry ? ' (retry)' : ''}`);
+  // Se o SQL já contém ROWNUM o usuário definiu o limite — não paginar
+  const temLimiteExplicito = /\bROWNUM\b/i.test(sql);
+  if (temLimiteExplicito) {
+    return _executarSQLBruto(sql, _retry);
+  }
+
+  // Paginação automática em blocos de 5.000
+  const BLOCO   = 5000;
   const tempoInicio = Date.now();
-  
+  let todos      = [];
+  let colunas    = [];
+  let pagina     = 0;
+
+  console.log(`[sql] Iniciando execução com paginação automática...`);
+
+  while (true) {
+    const offset = pagina * BLOCO;
+    const sqlPaginado = offset === 0
+      ? `SELECT * FROM (${sql}) WHERE ROWNUM <= ${BLOCO}`
+      : `SELECT * FROM (SELECT q.*, ROWNUM AS rn__ FROM (${sql}) q WHERE ROWNUM <= ${offset + BLOCO}) WHERE rn__ > ${offset}`;
+
+    const resultado = await _executarSQLBruto(sqlPaginado, _retry);
+
+    if (pagina === 0) {
+      colunas = resultado.colunas.filter(c => c !== 'RN__');
+    }
+
+    // Remove a coluna auxiliar de paginação (rn__) se presente
+    const linhas = resultado.registros.map(row => {
+      const { RN__: _rn, ...resto } = row;
+      return resto;
+    });
+
+    todos = todos.concat(linhas);
+
+    console.log(`[sql] Página ${pagina + 1}: ${linhas.length} linhas (total acumulado: ${todos.length})`);
+
+    // Menos que o bloco completo = última página
+    if (linhas.length < BLOCO) break;
+
+    pagina++;
+  }
+
+  const tempoTotal = Date.now() - tempoInicio;
+  console.log(`[sql] Concluído (${tempoTotal}ms) — ${todos.length} linhas totais, colunas: [${colunas}]`);
+  return { colunas, registros: todos, total: todos.length };
+}
+
+/**
+ * Executa o SQL exatamente como recebido, sem paginação.
+ * @internal
+ */
+async function _executarSQLBruto(sql, _retry = false) {
+  const tempoInicio = Date.now();
+
   const token = await obterToken();
   const url   = URL_GATEWAY;
 
@@ -297,7 +353,7 @@ export async function executarSQL(sql, _retry = false) {
     if (!_retry && /n[aã]o autorizado|unauthorized|token/i.test(msg)) {
       console.log(`[sql] Token rejeitado pelo Sankhya, renovando...`);
       invalidarToken();
-      return executarSQL(sql, true);
+      return _executarSQLBruto(sql, true);
     }
     throw new Error(`[sql] ${msg}`);
   }
@@ -312,7 +368,7 @@ export async function executarSQL(sql, _retry = false) {
   );
 
   const tempoTotal = Date.now() - tempoInicio;
-  console.log(`[sql] DbExplorerSP OK (${tempoTotal}ms) — ${rows.length} linhas, colunas: [${colunas}]`);
+  console.log(`[sql] DbExplorerSP OK (${tempoTotal}ms) — ${rows.length} linhas`);
   return { colunas, registros, total: rows.length };
 }
 
